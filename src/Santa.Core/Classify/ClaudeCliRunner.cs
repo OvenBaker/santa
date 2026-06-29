@@ -1,0 +1,103 @@
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+
+namespace Santa.Core.Classify;
+
+public sealed record ClaudeRunRequest(
+    string Prompt,
+    string Model,                          // haiku | sonnet | opus
+    IReadOnlyList<string> AllowedTools,    // e.g. ["Bash(git:*)", "Bash(gh:*)", "Read"]
+    string? PermissionMode = null,         // null | "acceptEdits" | "bypassPermissions"
+    string? WorkingDirectory = null,
+    TimeSpan? Timeout = null);
+
+public sealed record ClaudeRunResult(
+    int ExitCode,
+    string Stdout,
+    string Stderr,
+    string? ResultText,                    // parsed from JSON envelope
+    string? CostUsd,                       // ditto
+    JsonElement? Envelope);
+
+/// <summary>
+/// Shells out to <c>claude -p --output-format json …</c>. The resulting envelope shape is
+/// <c>{ "type":"result", "result":"…", "total_cost_usd": …, … }</c> on success.
+/// Every prompt is silently prefixed with <see cref="InternalSentinel"/> so the JSONL
+/// the CLI writes to <c>~/.claude/projects/</c> can be detected and skipped at ingest time.
+/// </summary>
+public static class ClaudeCliRunner
+{
+    /// <summary>
+    /// First-line marker prepended to every santa prompt sent through claude -p.
+    /// Lets ingest filter out the phantom sessions claude-p creates as a side effect.
+    /// </summary>
+    public const string InternalSentinel = "<<santa-claude-internal>>";
+
+    public static async Task<ClaudeRunResult> RunAsync(ClaudeRunRequest req, CancellationToken ct = default)
+    {
+        var prompt = InternalSentinel + "\n" + req.Prompt;
+        // --no-session-persistence (print-mode only): don't write a transcript to
+        // ~/.claude/projects. These internal runs are read from stdout, never resumed,
+        // and otherwise flood the session store (hundreds of phantom transcripts that
+        // ingest then has to filter and cockpit's candidate scan has to skip). The
+        // InternalSentinel prefix stays as belt-and-suspenders for already-persisted ones.
+        var args = new List<string> { "-p", prompt, "--output-format", "json", "--no-session-persistence" };
+        if (!string.IsNullOrEmpty(req.Model))
+            args.AddRange(new[] { "--model", req.Model });
+        if (req.AllowedTools.Count > 0)
+            args.AddRange(new[] { "--allowed-tools", string.Join(" ", req.AllowedTools) });
+        if (!string.IsNullOrEmpty(req.PermissionMode))
+            args.AddRange(new[] { "--permission-mode", req.PermissionMode });
+
+        var psi = new ProcessStartInfo("claude")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = req.WorkingDirectory ?? Environment.CurrentDirectory,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to launch `claude`.");
+
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+        if (req.Timeout is { } t)
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(t);
+            try { await proc.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(true); } catch { }
+                throw new TimeoutException($"`claude -p` timed out after {t}.");
+            }
+        }
+        else
+        {
+            await proc.WaitForExitAsync(ct);
+        }
+
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+
+        string? resultText = null;
+        string? costUsd = null;
+        JsonElement? envelope = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(stdout);
+            envelope = doc.RootElement.Clone();
+            if (envelope.Value.TryGetProperty("result", out var rEl) && rEl.ValueKind == JsonValueKind.String)
+                resultText = rEl.GetString();
+            if (envelope.Value.TryGetProperty("total_cost_usd", out var cEl))
+                costUsd = cEl.ToString();
+        }
+        catch (JsonException) { }
+
+        return new ClaudeRunResult(proc.ExitCode, stdout, stderr, resultText, costUsd, envelope);
+    }
+}
