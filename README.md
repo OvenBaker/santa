@@ -70,3 +70,7 @@ the three fit together.
 Personal tooling, shared as-is. No tests, no CI. Built and run on **WSL + Linux**.
 The build surfaces an `NU1903` advisory on a transitive `SQLitePCLRaw` native
 package — noted, not yet bumped. PRs welcome; expectations modest.
+
+## License
+
+[The Unlicense](LICENSE) — released into the public domain. Do whatever you want.
