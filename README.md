@@ -8,11 +8,18 @@ You talk to a lot of agents. santa makes that history searchable: *"that postgre
 migration we argued about"*, *"the auth refactor from last week"* — find the session,
 read it, and resume it where you left off.
 
+The main way to use santa is its full-screen **TUI**:
+
 ```bash
-santa refresh                # index ~/.claude/projects + ~/.codex/sessions
-santa query "the flaky test we kept fighting"
-santa recent                 # what you worked on lately, grouped by project
-santa                        # interactive TUI: browse → resume
+santa tui          # browse + search your whole history, resume with one key
+```
+
+Everything it does is also a plain command, for scripting or muscle memory:
+
+```bash
+santa query "the flaky test we kept fighting"   # one-shot hybrid search
+santa recent                                     # recent sessions, grouped by project
+santa refresh                                    # re-index (the TUI also does this on launch)
 ```
 
 ## Install
@@ -30,6 +37,45 @@ HuggingFace and the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extensi
 from GitHub, then works fully offline. A CUDA build of onnxruntime ships in the box
 and is used automatically if a GPU is present; otherwise it falls back to CPU.
 
+## The TUI
+
+`santa tui` is the main interface — a full-screen, keyboard-driven browser over your
+whole session history. It runs a silent incremental index on launch, so it's always
+current; you rarely need `santa refresh` by hand.
+
+Two tabs, switched with `Tab`:
+
+- **Browse** — every session as a scrollable list (date · cwd · turns · duration ·
+  title), newest first. A green `●` marks sessions running *right now*; `✓` marks ones
+  you've completed; `cx` tags Codex sessions. A detail pane shows the summary.
+- **Search** — hybrid BM25 + on-device vector search with a reranker. Type a query,
+  hit Enter; the match panel shows the snippet and the `bm25`/`vec`/`fused`/`rerank`
+  scores.
+
+### Keys
+
+| Key | Browse | Search |
+|-----|--------|--------|
+| `↑` `↓` · `PgUp` `PgDn` · `Home` `End` | move selection | move through results |
+| `Tab` | switch tab | switch tab |
+| `/` | live filter (title · cwd · branch · summary) | edit the query |
+| `Enter` | expand the detail pane | run the search |
+| `s` | toggle the detail pane | — |
+| `c` | mark session completed (hide from default search) | — |
+| `r` | **resume** → cockpit if attached, else a new terminal | resume the hit |
+| `t` | resume in a **new terminal** (ignore the cockpit handoff) | same |
+| `v` | toggle stacked ↔ side-by-side layout (≥140 cols) | same |
+| `Ctrl-O` | theme picker (live preview, `Enter` saves) | same |
+| `Ctrl-Q` | quit | quit |
+
+Resume is the payoff: land on a session, press `r`, and you're back in it — a fresh
+terminal tab, or dropped straight into a [cockpit](https://github.com/OvenBaker/cockpit)
+pane if you launched the TUI from there (`cockpit --santa`). Theme and layout choices
+persist across runs.
+
+Flags: `--keyword-only` (BM25-only, skip embeddings) · `--no-refresh` (skip the
+launch-time index) · `--device <id>` (pick a GPU).
+
 ## Where state lives
 
 Everything — the index DB, the downloaded models, and native libs — lives under
@@ -40,17 +86,19 @@ The index is built from *your* transcripts and is never committed or shared.
 > `~/.local/share/santa-claude/` state dir automatically, and the binary still
 > honours `SANTA_CLAUDE_HOME` as a deprecated alias for `SANTA_HOME`.
 
-## Commands
+## Scriptable commands
+
+Everything the TUI does, minus the UI — for piping, scripts, or muscle memory.
 
 | Command | Does |
 |---------|------|
+| `santa tui` | The full-screen interface above. |
 | `santa refresh` | Incrementally index new/changed sessions. |
 | `santa query <text>` | Hybrid semantic + keyword search across all history. |
 | `santa recent` | Recently-touched sessions, grouped by project. |
 | `santa related <id>` | Sessions semantically near a given one. |
 | `santa show <id>` / `export <id>` | Read or dump a full transcript. |
 | `santa resume <id>` | Re-open a session in its original CLI (Claude or Codex). |
-| `santa` | Interactive TUI — browse, search, resume from the keyboard. |
 
 ## Companion tools
 
