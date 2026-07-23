@@ -9,10 +9,18 @@ public sealed class Database : IDisposable
 
     private Database(SqliteConnection conn) => Connection = conn;
 
-    public static Database Open(string path)
+    public static Database Open(string path, int? defaultTimeoutSeconds = null)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var conn = new SqliteConnection($"Data Source={path};Cache=Shared");
+        var cs = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Cache = SqliteCacheMode.Shared
+        };
+        if (defaultTimeoutSeconds is int timeout)
+            cs.DefaultTimeout = timeout;
+
+        var conn = new SqliteConnection(cs.ToString());
         conn.Open();
 
         using (var cmd = conn.CreateCommand())

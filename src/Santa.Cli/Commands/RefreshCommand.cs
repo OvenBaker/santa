@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.Data.Sqlite;
 using Santa.Core.Embedding;
 using Santa.Core.Ingest;
 using Santa.Core.Sessions;
@@ -17,6 +18,8 @@ namespace Santa.Cli.Commands;
 /// </summary>
 public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
 {
+    private const int DatabaseLockTimeoutSeconds = 2;
+
     public sealed class Settings : CommandSettings
     {
         [CommandOption("--db <PATH>")]
@@ -51,73 +54,114 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
             return 2;
         }
 
-        using var db = Database.Open(dbPath);
+        using var refreshLock = TryAcquireRefreshLock(dbPath);
+        if (refreshLock is null)
+            return ReportSkipped(s.Quiet, startedAt, "refresh-already-running");
 
-        // Ingest with auto-embed (mirrors the IngestCommand heuristic).
-        IEmbedder? embedder = null;
         try
         {
-            var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
-            if (File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
-                && db.TryEnableVec(ecfg.Dimensions)
-                && new VectorRepository(db.Connection).HasEmbeddings(ecfg.ModelId))
+            // Refresh is an unattended best-effort job. Do not let Microsoft.Data.Sqlite's normal
+            // busy retries keep a cron process alive (and potentially holding CUDA memory) behind
+            // another writer. Interactive commands retain the normal provider timeout.
+            using var db = Database.Open(dbPath, DatabaseLockTimeoutSeconds);
+
+            // Ingest with auto-embed (mirrors the IngestCommand heuristic).
+            IEmbedder? embedder = null;
+            try
             {
-                try { embedder = new LocalEmbedder(ecfg); } catch { embedder = null; }
-            }
-
-            var stats = new IngestService(db).Run(new IngestOptions(
-                ProjectsRoot: projects,
-                CodexRoot: codexRoot,
-                Embedder: embedder,
-                Log: _ => { }));
-
-            if (!s.Quiet)
-                AnsiConsole.MarkupLineInterpolated(
-                    $"[grey]ingest:[/] scanned={stats.FilesScanned} touched={stats.SessionsTouched} chunks+={stats.ChunksWritten}");
-
-            // Summarise stale missing sessions when Max plan is in play.
-            int summarised = 0, failed = 0;
-            if (!s.NoSummary
-                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"))
-                && AnyExistingSummary(db))
-            {
-                var summarizer = new Summarizer(db);
-                var pending = LoadActiveSessions(db).Where(x => summarizer.NeedsSummary(x.Id, x.TurnCount)).ToList();
-                if (pending.Count > 0)
+                var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+                if (File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
+                    && db.TryEnableVec(ecfg.Dimensions)
+                    && new VectorRepository(db.Connection).HasEmbeddings(ecfg.ModelId))
                 {
-                    var sem = new SemaphoreSlim(Math.Max(1, s.Concurrency));
-                    int doneCount = 0;
-                    var tasks = pending.Select(async sess =>
-                    {
-                        await sem.WaitAsync(ct);
-                        try
-                        {
-                            await summarizer.SummariseAsync(sess, false, _ => { }, ct);
-                            Interlocked.Increment(ref summarised);
-                        }
-                        catch { Interlocked.Increment(ref failed); }
-                        finally { sem.Release(); Interlocked.Increment(ref doneCount); }
-                    });
-                    await Task.WhenAll(tasks);
+                    try { embedder = new LocalEmbedder(ecfg); } catch { embedder = null; }
                 }
+
+                var stats = new IngestService(db).Run(new IngestOptions(
+                    ProjectsRoot: projects,
+                    CodexRoot: codexRoot,
+                    Embedder: embedder,
+                    Log: _ => { }));
+
                 if (!s.Quiet)
                     AnsiConsole.MarkupLineInterpolated(
-                        $"[grey]summary:[/] candidates={pending.Count} ok={summarised} failed={failed}");
-            }
+                        $"[grey]ingest:[/] scanned={stats.FilesScanned} touched={stats.SessionsTouched} chunks+={stats.ChunksWritten}");
 
-            var elapsed = (DateTimeOffset.Now - startedAt).TotalSeconds;
-            if (s.Quiet)
-            {
-                Console.WriteLine(
-                    $"{startedAt:O} ok ingested={stats.SessionsTouched} chunks+={stats.ChunksWritten} summarised={summarised} elapsed={elapsed:F1}s");
+                // Summarise stale missing sessions when Max plan is in play.
+                int summarised = 0, failed = 0;
+                if (!s.NoSummary
+                    && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"))
+                    && AnyExistingSummary(db))
+                {
+                    var summarizer = new Summarizer(db);
+                    var pending = LoadActiveSessions(db).Where(x => summarizer.NeedsSummary(x.Id, x.TurnCount)).ToList();
+                    if (pending.Count > 0)
+                    {
+                        var sem = new SemaphoreSlim(Math.Max(1, s.Concurrency));
+                        int doneCount = 0;
+                        var tasks = pending.Select(async sess =>
+                        {
+                            await sem.WaitAsync(ct);
+                            try
+                            {
+                                await summarizer.SummariseAsync(sess, false, _ => { }, ct);
+                                Interlocked.Increment(ref summarised);
+                            }
+                            catch { Interlocked.Increment(ref failed); }
+                            finally { sem.Release(); Interlocked.Increment(ref doneCount); }
+                        });
+                        await Task.WhenAll(tasks);
+                    }
+                    if (!s.Quiet)
+                        AnsiConsole.MarkupLineInterpolated(
+                            $"[grey]summary:[/] candidates={pending.Count} ok={summarised} failed={failed}");
+                }
+
+                var elapsed = (DateTimeOffset.Now - startedAt).TotalSeconds;
+                if (s.Quiet)
+                {
+                    Console.WriteLine(
+                        $"{startedAt:O} ok ingested={stats.SessionsTouched} chunks+={stats.ChunksWritten} summarised={summarised} elapsed={elapsed:F1}s");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLineInterpolated($"[grey]done in {elapsed:F1}s[/]");
+                }
+                return 0;
             }
-            else
-            {
-                AnsiConsole.MarkupLineInterpolated($"[grey]done in {elapsed:F1}s[/]");
-            }
-            return 0;
+            finally { embedder?.Dispose(); }
         }
-        finally { embedder?.Dispose(); }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+        {
+            return ReportSkipped(s.Quiet, startedAt, "database-busy");
+        }
+    }
+
+    private static FileStream? TryAcquireRefreshLock(string dbPath)
+    {
+        var fullDbPath = Path.GetFullPath(dbPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullDbPath)!);
+        try
+        {
+            // The file intentionally remains after disposal: FileShare.None is the live lease, so a
+            // crash releases it automatically and a stale on-disk file never blocks a later refresh.
+            return new FileStream(fullDbPath + ".refresh.lock", FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    private static int ReportSkipped(bool quiet, DateTimeOffset startedAt, string reason)
+    {
+        var elapsed = (DateTimeOffset.Now - startedAt).TotalSeconds;
+        if (quiet)
+            Console.WriteLine($"{startedAt:O} skipped reason={reason} elapsed={elapsed:F1}s");
+        else
+            AnsiConsole.MarkupLineInterpolated($"[yellow]skipped:[/] {reason} [grey]({elapsed:F1}s)[/]");
+        return 0;
     }
 
     private static bool AnyExistingSummary(Database db)

@@ -21,6 +21,10 @@ public sealed record IngestStats(int FilesScanned, int FilesIngested, int FilesS
 
 public sealed class IngestService
 {
+    // Negative cursor sequence reserved for files deliberately excluded by the current pruning policy.
+    // Bump this value if a future policy needs to revisit already-excluded files once.
+    private const int ExcludedSessionCursor = -2;
+
     private readonly Database _db;
     private readonly ChunkerOptions _chunkerOpts;
 
@@ -60,6 +64,38 @@ public sealed class IngestService
             var mtime = new DateTimeOffset(fi.LastWriteTimeUtc).ToUnixTimeSeconds();
 
             var existing = cursors.Get(path);
+
+            // A normal incremental refresh skips unchanged files. Check the cheap, header-only exclusion
+            // metadata before that short-circuit so sessions indexed by an older pruning policy are removed
+            // too — a finished automated run's file never changes, so it would otherwise stay forever.
+            if (existing is { LastSeq: not ExcludedSessionCursor } &&
+                existing.SessionId is { Length: > 0 } existingSessionId)
+            {
+                bool excludedByMetadata;
+                try
+                {
+                    excludedByMetadata = provider == "codex"
+                        ? SessionAggregate.ShouldExcludeCodexFile(path)
+                        : SessionAggregate.ShouldExcludeClaudeFile(path);
+                }
+                catch (Exception ex)
+                {
+                    log($"  ! metadata parse failed {path}: {ex.Message}");
+                    excludedByMetadata = false;
+                }
+
+                if (excludedByMetadata)
+                {
+                    if (!opts.DryRun)
+                        PruneSession(sessions, cursors,
+                            new FileCursor(path, size, mtime, size, ExcludedSessionCursor, existingSessionId));
+                    var action = opts.DryRun ? "would prune" : "pruned";
+                    log($"  - {action} controlled session {existingSessionId[..Math.Min(8, existingSessionId.Length)]}");
+                    skipped++;
+                    continue;
+                }
+            }
+
             if (!opts.ForceFull && !opts.MetadataOnly && existing is not null
                 && existing.Size == size && existing.MtimeUnix == mtime)
             {
@@ -75,14 +111,13 @@ public sealed class IngestService
                 continue;
             }
 
-            if (agg.IsInternal)
+            if (agg.IsInternal || agg.IsExcludedAgentRun)
             {
-                // Echo of our own claude -p invocation. Drop any existing record and skip.
+                // Either santa's own `claude -p` echo or a controlled/automated agent run. Drop any existing
+                // record and stamp the cursor so a finished, unchanging run is not rebuilt every refresh.
                 if (!opts.DryRun)
-                {
-                    sessions.Delete(agg.SessionId);
-                    cursors.Upsert(new FileCursor(path, size, mtime, size, -1, agg.SessionId));
-                }
+                    PruneSession(sessions, cursors,
+                        new FileCursor(path, size, mtime, size, ExcludedSessionCursor, agg.SessionId));
                 skipped++;
                 continue;
             }
@@ -194,5 +229,17 @@ public sealed class IngestService
         log($"    --- chunk seq {c.StartSeq}..{c.EndSeq}  ~{c.ApproxTokens}t ---");
         foreach (var line in preview.Split('\n'))
             log($"    {line}");
+    }
+
+    private void PruneSession(SessionRepository sessions, FileCursorRepository cursors, FileCursor cursor)
+    {
+        using var tx = _db.BeginTransaction();
+        // vec0 is a virtual table and cannot participate in the chunks FK cascade.
+        if (_db.VecEnabled && cursor.SessionId is { Length: > 0 } sessionId)
+            new VectorRepository(_db.Connection).DeleteForSession(sessionId, tx);
+        if (cursor.SessionId is { Length: > 0 } id)
+            sessions.Delete(id, tx);
+        cursors.Upsert(cursor, tx);
+        tx.Commit();
     }
 }
