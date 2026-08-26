@@ -19,7 +19,8 @@ public sealed record TuiSessionRow(
     string? SummaryShort,
     int TurnCount,
     int TotalChunks,
-    string Provider = "claude-code")
+    string Provider = "claude-code",
+    double? CostUsd = null)
 {
     public bool IsCodex => Provider == "codex";
 
@@ -30,8 +31,16 @@ public sealed record TuiSessionRow(
 
     public string Duration => DurationFormat.Compact(StartedAt, LastActiveAt);
 
-    public string StatsBlurb =>
-        string.IsNullOrEmpty(Duration) ? $"{TurnCount}t" : $"{TurnCount}t · {Duration}";
+    public string StatsBlurb
+    {
+        get
+        {
+            var s = string.IsNullOrEmpty(Duration) ? $"{TurnCount}t" : $"{TurnCount}t · {Duration}";
+            if (CostUsd is > 0.005 and var c)
+                s += c >= 10 ? $" · ${c:F0}" : $" · ${c:F2}";
+            return s;
+        }
+    }
 
     public string StatusIcon => Status switch
     {
@@ -61,7 +70,7 @@ public static class SessionsListAdapter
                    s.first_user_text, s.summary_title, s.summary_short,
                    s.turn_count,
                    (SELECT COUNT(*) FROM chunks c WHERE c.session_id = s.id) AS chunk_count,
-                   s.provider
+                   s.provider, s.cost_usd
             FROM sessions s
             ORDER BY COALESCE(s.last_active_at, s.started_at) DESC
             """;
@@ -81,7 +90,8 @@ public static class SessionsListAdapter
                 SummaryShort: rd.IsDBNull(8) ? null : rd.GetString(8),
                 TurnCount: rd.GetInt32(9),
                 TotalChunks: rd.GetInt32(10),
-                Provider: rd.IsDBNull(11) ? "claude-code" : rd.GetString(11)));
+                Provider: rd.IsDBNull(11) ? "claude-code" : rd.GetString(11),
+                CostUsd: rd.IsDBNull(12) ? null : rd.GetDouble(12)));
         }
         return list;
     }

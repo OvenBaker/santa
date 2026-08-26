@@ -82,6 +82,8 @@ public sealed class Database : IDisposable
             AddColumn(conn, "sessions", "last_active_at TEXT");
         if (!existing.Contains("provider"))
             AddColumn(conn, "sessions", "provider TEXT NOT NULL DEFAULT 'claude-code'");
+        if (!existing.Contains("cost_usd"))
+            AddColumn(conn, "sessions", "cost_usd REAL");
     }
 
     private static void AddColumn(SqliteConnection conn, string table, string columnDef)

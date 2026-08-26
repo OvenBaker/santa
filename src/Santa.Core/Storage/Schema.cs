@@ -29,7 +29,8 @@ public static class Schema
             status            TEXT NOT NULL DEFAULT 'active',  -- active|completed|archived
             status_source     TEXT,                       -- recipe id or 'manual'
             status_set_at     TEXT,
-            provider          TEXT NOT NULL DEFAULT 'claude-code'  -- 'claude-code' | 'codex'
+            provider          TEXT NOT NULL DEFAULT 'claude-code',  -- 'claude-code' | 'codex'
+            cost_usd          REAL                        -- rollup of session_usage
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_status      ON sessions(status);
         CREATE INDEX IF NOT EXISTS idx_sessions_started_at  ON sessions(started_at);
@@ -63,6 +64,22 @@ public static class Schema
             last_offset INTEGER NOT NULL DEFAULT 0,
             last_seq    INTEGER NOT NULL DEFAULT -1,
             session_id  TEXT
+        );
+
+        -- Per-session, per-model token usage (API-equivalent cost weighting).
+        -- Deliberately NO foreign key to sessions: pruned agent runs (sdk workers,
+        -- workflow fan-outs) keep usage rows after their session row is deleted.
+        CREATE TABLE IF NOT EXISTS session_usage (
+            session_id         TEXT NOT NULL,
+            model              TEXT NOT NULL,
+            turns              INTEGER NOT NULL DEFAULT 0,
+            input_tokens       INTEGER NOT NULL DEFAULT 0,
+            output_tokens      INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd           REAL NOT NULL DEFAULT 0,
+            updated_at         TEXT,
+            PRIMARY KEY (session_id, model)
         );
 
         CREATE TABLE IF NOT EXISTS classifications (

@@ -39,6 +39,7 @@ public sealed class IngestService
         var sessions = new SessionRepository(_db.Connection);
         var chunks = new ChunkRepository(_db.Connection);
         var cursors = new FileCursorRepository(_db.Connection);
+        var usage = new UsageRepository(_db.Connection);
         var vectors = opts.Embedder is not null ? new VectorRepository(_db.Connection) : null;
         var log = opts.Log ?? (_ => { });
         if (opts.Embedder is not null && !_db.VecEnabled)
@@ -115,9 +116,12 @@ public sealed class IngestService
             {
                 // Either santa's own `claude -p` echo or a controlled/automated agent run. Drop any existing
                 // record and stamp the cursor so a finished, unchanging run is not rebuilt every refresh.
+                // Usage rows are still recorded (session_usage has no FK): excluded sdk/workflow runs are
+                // precisely where token burn hides, even though they stay out of browse and search.
                 if (!opts.DryRun)
                     PruneSession(sessions, cursors,
-                        new FileCursor(path, size, mtime, size, ExcludedSessionCursor, agg.SessionId));
+                        new FileCursor(path, size, mtime, size, ExcludedSessionCursor, agg.SessionId),
+                        usage, agg.UsageByModel);
                 skipped++;
                 continue;
             }
@@ -162,6 +166,9 @@ public sealed class IngestService
                     DerivedBranchesJson: derivedJson,
                     LastActiveAt: agg.LastActiveAt,
                     Provider: agg.Provider), tx);
+
+                if (agg.UsageByModel.Count > 0)
+                    usage.Replace(agg.SessionId, agg.UsageByModel, tx);
 
                 if (!opts.MetadataOnly)
                 {
@@ -231,7 +238,8 @@ public sealed class IngestService
             log($"    {line}");
     }
 
-    private void PruneSession(SessionRepository sessions, FileCursorRepository cursors, FileCursor cursor)
+    private void PruneSession(SessionRepository sessions, FileCursorRepository cursors, FileCursor cursor,
+        UsageRepository? usage = null, IReadOnlyList<Santa.Core.Usage.ModelUsage>? usageRollups = null)
     {
         using var tx = _db.BeginTransaction();
         // vec0 is a virtual table and cannot participate in the chunks FK cascade.
@@ -239,6 +247,8 @@ public sealed class IngestService
             new VectorRepository(_db.Connection).DeleteForSession(sessionId, tx);
         if (cursor.SessionId is { Length: > 0 } id)
             sessions.Delete(id, tx);
+        if (usage is not null && usageRollups is { Count: > 0 } && cursor.SessionId is { Length: > 0 } sid)
+            usage.Replace(sid, usageRollups, tx);
         cursors.Upsert(cursor, tx);
         tx.Commit();
     }

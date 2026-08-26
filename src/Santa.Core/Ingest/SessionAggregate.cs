@@ -23,6 +23,8 @@ public sealed class SessionAggregate
     public int MessageCount { get; private set; }
     public IReadOnlyList<Turn> Turns { get; private set; } = Array.Empty<Turn>();
     public IReadOnlyList<string> DerivedBranches { get; private set; } = Array.Empty<string>();
+    /// <summary>Per-model token usage (Claude transcripts only; empty for Codex).</summary>
+    public IReadOnlyList<Usage.ModelUsage> UsageByModel { get; private set; } = Array.Empty<Usage.ModelUsage>();
     /// <summary>True when this JSONL was produced by santa itself shelling out to
     /// <c>claude -p</c> — should be filtered out of the index.</summary>
     public bool IsInternal { get; private set; }
@@ -64,12 +66,14 @@ public sealed class SessionAggregate
     public void Build()
     {
         var events = new List<JsonlEvent>();
+        var usage = new Usage.UsageAccumulator();
         var reader = IsCodex
             ? new CodexJsonlReader(FilePath).Read()
             : new JsonlReader(FilePath).Read();
         foreach (var (_, _, ev) in reader)
         {
             events.Add(ev);
+            if (!IsCodex) usage.Add(ev);
             // Codex records both the launcher and whether a run is subordinate to a primary driver in its
             // session metadata. Capture those structural signals for the exclusion check below.
             if (IsCodex && ev.Type == "session_meta")
@@ -111,6 +115,7 @@ public sealed class SessionAggregate
 
         Turns = (IsCodex ? CodexTurnBuilder.Build(events) : TurnBuilder.Build(events)).ToList();
         DerivedBranches = BranchExtractor.Extract(events);
+        UsageByModel = usage.ToRollups();
 
         // Detect santa's own claude-p invocations so we don't pollute the index with
         // copies of our own prompts. Modern calls carry the sentinel; legacy ones we recognise
