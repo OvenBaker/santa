@@ -4,34 +4,33 @@ namespace Santa.Core.Embedding;
 
 public sealed record GpuInfoReport(
     string OrtVersion,
+    string BuildFlavor,
+    InferenceProvider SelectedProvider,
     IReadOnlyList<string> AvailableProviders,
-    bool CudaAvailable,
+    bool ProviderAvailable,
     int? PinnedDeviceId,
-    string? CudaError);
+    string? ProviderError);
 
 public static class GpuInfo
 {
-    public static GpuInfoReport Probe(int deviceId = 0)
+    public static GpuInfoReport Probe(InferenceProvider provider, int deviceId = 0)
     {
-        var env = OrtEnv.Instance();
         var providers = OrtEnv.Instance().GetAvailableProviders().ToList();
-        var hasCuda = providers.Any(p => p.Contains("CUDA", StringComparison.OrdinalIgnoreCase));
 
         string? err = null;
-        if (hasCuda)
+        try
         {
-            try
-            {
-                using var opts = new SessionOptions();
-                opts.AppendExecutionProvider_CUDA(deviceId);
-            }
-            catch (Exception ex) { err = ex.Message; }
+            using var opts = InferenceRuntime.CreateSessionOptions(provider, deviceId);
         }
+        catch (Exception ex) { err = ex.Message; }
+
         return new GpuInfoReport(
             OrtVersion: typeof(OrtEnv).Assembly.GetName().Version?.ToString() ?? "unknown",
+            BuildFlavor: InferenceRuntime.BuildFlavor,
+            SelectedProvider: provider,
             AvailableProviders: providers,
-            CudaAvailable: hasCuda && err is null,
-            PinnedDeviceId: hasCuda ? deviceId : null,
-            CudaError: err);
+            ProviderAvailable: err is null,
+            PinnedDeviceId: provider == InferenceProvider.Cuda ? deviceId : null,
+            ProviderError: err);
     }
 }

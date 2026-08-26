@@ -7,8 +7,11 @@ public sealed record EmbedderConfig(
     string OnnxPath,                 // <santa-home>/models/<id>/model.onnx
     string VocabPath,                // <santa-home>/models/<id>/vocab.txt (BERT WordPiece)
     bool LowerCase = true,           // bert-base-uncased style
-    int DeviceId = 0,                // CUDA device — pinned to RTX 4080 in WSL
+    InferenceProvider Provider = InferenceProvider.Cpu,
+    int DeviceId = 0,                // CUDA device when Provider is Cuda
     int BatchSize = 16,
+    int MaxBatchTokens = 16_384,     // bounds padding-amplified attention work
+    long CudaMemoryLimitBytes = 7L * 1024 * 1024 * 1024,
     string DocumentPrefix = "search_document: ",
     string QueryPrefix = "search_query: ")
 {
@@ -21,7 +24,8 @@ public sealed record EmbedderConfig(
         MaxTokens: 2048,
         OnnxPath: Path.Combine(root, "models", "nomic-embed-text-v1.5", "model.onnx"),
         VocabPath: Path.Combine(root, "models", "nomic-embed-text-v1.5", "vocab.txt"),
-        BatchSize: 8);
+        BatchSize: 8,
+        MaxBatchTokens: 16_384);
 
     public static string DefaultRoot => SantaPaths.Home;
 }

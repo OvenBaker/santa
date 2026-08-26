@@ -4,13 +4,24 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <SantaOnnxRuntimeFlavor Condition="'$(SantaOnnxRuntimeFlavor)' == ''">gpu</SantaOnnxRuntimeFlavor>
+    <DefineConstants Condition="'$(SantaOnnxRuntimeFlavor)' == 'gpu'">$(DefineConstants);SANTA_CUDA</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.25.1" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1"
+                      Condition="'$(SantaOnnxRuntimeFlavor)' == 'cpu'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.25.1"
+                      Condition="'$(SantaOnnxRuntimeFlavor)' == 'gpu'" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageReference Include="YamlDotNet" Version="17.0.1" />
   </ItemGroup>
+
+  <Target Name="ValidateSantaOnnxRuntimeFlavor" BeforeTargets="PrepareForBuild"
+          Condition="'$(SantaOnnxRuntimeFlavor)' != 'cpu' and '$(SantaOnnxRuntimeFlavor)' != 'gpu'">
+    <Error Text="SantaOnnxRuntimeFlavor must be 'cpu' or 'gpu' (got '$(SantaOnnxRuntimeFlavor)')." />
+  </Target>
 
 </Project>

@@ -5,7 +5,7 @@ using Microsoft.ML.Tokenizers;
 namespace Santa.Core.Embedding;
 
 /// <summary>
-/// ONNX Runtime CUDA EP embedder. Pinned to a single device id (default 0 — RTX 4080 under WSL).
+/// Local ONNX Runtime embedder using the explicitly selected execution provider.
 /// Tokenizes with the model's bundled tokenizer.json, runs forward, mean-pools, L2-normalises.
 /// </summary>
 public sealed class LocalEmbedder : IEmbedder
@@ -27,13 +27,8 @@ public sealed class LocalEmbedder : IEmbedder
         if (!File.Exists(cfg.VocabPath))
             throw new FileNotFoundException($"BERT vocab not found at {cfg.VocabPath}.");
 
-        var opts = new SessionOptions();
-        opts.AppendExecutionProvider_CUDA(cfg.DeviceId);
-        opts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-        // Suppress the harmless "Some nodes were not assigned to the preferred EP" warning —
-        // shape-related ops always run on CPU; the warning fires once per session and is just noise.
-        opts.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR;
-
+        using var opts = InferenceRuntime.CreateSessionOptions(
+            cfg.Provider, cfg.DeviceId, cfg.CudaMemoryLimitBytes);
         _session = new InferenceSession(cfg.OnnxPath, opts);
 
         using var vocabFs = File.OpenRead(cfg.VocabPath);
@@ -51,21 +46,38 @@ public sealed class LocalEmbedder : IEmbedder
         if (texts.Count == 0) return Array.Empty<float[]>();
         var prefix = kind == EmbedKind.Query ? _cfg.QueryPrefix : _cfg.DocumentPrefix;
 
-        var results = new float[texts.Count][];
-        for (int batchStart = 0; batchStart < texts.Count; batchStart += _cfg.BatchSize)
+        // Tokenize first so batching can be constrained by the padded tensor area, not merely
+        // document count. A single long document otherwise turns batch-size 8 into 8 x 2,048.
+        var encodedTexts = new EncodeResults[texts.Count];
+        for (int i = 0; i < texts.Count; i++)
         {
-            var batchEnd = Math.Min(batchStart + _cfg.BatchSize, texts.Count);
-            var batchSize = batchEnd - batchStart;
+            var ids = _tokenizer.EncodeToIds(prefix + texts[i]);
+            encodedTexts[i] = new EncodeResults(ids.Take(_cfg.MaxTokens).ToArray());
+        }
 
-            var encoded = new EncodeResults[batchSize];
+        var results = new float[texts.Count][];
+        for (int batchStart = 0; batchStart < texts.Count;)
+        {
+            var batchEnd = batchStart;
             int maxLen = 0;
-            for (int i = 0; i < batchSize; i++)
+            while (batchEnd < texts.Count && batchEnd - batchStart < _cfg.BatchSize)
             {
-                var ids = _tokenizer.EncodeToIds(prefix + texts[batchStart + i]);
-                var truncated = ids.Take(_cfg.MaxTokens).ToArray();
-                encoded[i] = new EncodeResults(truncated);
-                if (truncated.Length > maxLen) maxLen = truncated.Length;
+                var candidateMax = Math.Max(maxLen, encodedTexts[batchEnd].Ids.Length);
+                var candidateSize = batchEnd - batchStart + 1;
+                if (candidateSize > 1 && candidateSize * candidateMax > _cfg.MaxBatchTokens)
+                    break;
+                maxLen = candidateMax;
+                batchEnd++;
             }
+
+            // A single input is always allowed and is already truncated to MaxTokens.
+            if (batchEnd == batchStart)
+            {
+                batchEnd++;
+                maxLen = encodedTexts[batchStart].Ids.Length;
+            }
+
+            var batchSize = batchEnd - batchStart;
             if (maxLen == 0) maxLen = 1;
 
             var inputIds = new long[batchSize * maxLen];
@@ -73,7 +85,7 @@ public sealed class LocalEmbedder : IEmbedder
             var tokenType = new long[batchSize * maxLen];
             for (int i = 0; i < batchSize; i++)
             {
-                var ids = encoded[i].Ids;
+                var ids = encodedTexts[batchStart + i].Ids;
                 for (int j = 0; j < ids.Length; j++)
                 {
                     inputIds[i * maxLen + j] = ids[j];
@@ -99,10 +111,13 @@ public sealed class LocalEmbedder : IEmbedder
 
             for (int i = 0; i < batchSize; i++)
             {
-                var pooled = MeanPool(hidden, i, encoded[i].Ids.Length, _cfg.Dimensions, maxLen);
+                var pooled = MeanPool(
+                    hidden, i, encodedTexts[batchStart + i].Ids.Length, _cfg.Dimensions, maxLen);
                 Normalize(pooled);
                 results[batchStart + i] = pooled;
             }
+
+            batchStart = batchEnd;
         }
         return results;
     }

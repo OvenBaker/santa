@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Santa.Cli;
 using Santa.Cli.Theming;
 using Santa.Core.Embedding;
 using Santa.Core.Search;
@@ -39,6 +40,11 @@ public sealed class RelatedCommand : Command<RelatedCommand.Settings>
         [CommandOption("--keyword-only")]
         public bool KeywordOnly { get; init; }
 
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
+
         [CommandOption("--porcelain")]
         [Description("Machine-readable TSV: id<TAB>cwd<TAB>title<TAB>same_repo. For cockpit.")]
         public bool Porcelain { get; init; }
@@ -52,6 +58,9 @@ public sealed class RelatedCommand : Command<RelatedCommand.Settings>
 
     protected override int Execute(CommandContext context, Settings s, CancellationToken cancellationToken)
     {
+        if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
         var lookup = new SessionLookup(db);
 
@@ -64,18 +73,30 @@ public sealed class RelatedCommand : Command<RelatedCommand.Settings>
         if (string.IsNullOrWhiteSpace(query)) return Fail(s, "source session has no summary/text to match on");
 
         IEmbedder? embedder = null;
-        if (!s.KeywordOnly)
+        if (provider is not null)
         {
-            var cfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var cfg = InferenceProviderOption.Apply(
+                EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(cfg.OnnxPath) && File.Exists(cfg.VocabPath) && db.TryEnableVec(cfg.Dimensions))
-                try { embedder = new LocalEmbedder(cfg); } catch { /* degrade to bm25 */ }
+            {
+                try { embedder = new LocalEmbedder(cfg); }
+                catch (Exception ex) { return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex); }
+            }
         }
         IReranker? reranker = null;
-        if (!s.NoRerank)
+        if (provider is not null && !s.NoRerank)
         {
-            var rcfg = RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var rcfg = InferenceProviderOption.Apply(
+                RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(rcfg.OnnxPath) && File.Exists(rcfg.VocabPath))
-                try { reranker = new LocalReranker(rcfg); } catch { /* skip */ }
+            {
+                try { reranker = new LocalReranker(rcfg); }
+                catch (Exception ex)
+                {
+                    embedder?.Dispose();
+                    return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex);
+                }
+            }
         }
 
         // Pull a few extra to absorb dropping the source itself and the repo re-sort.

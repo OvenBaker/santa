@@ -16,6 +16,7 @@ public static class SantaPaths
     public static string NativeDir   => Path.Combine(Home, "native");
     public static string VecLibPath  => Path.Combine(NativeDir, "vec0");
     public static string RecipesDir  => Path.Combine(Home, "recipes");
+    public static string SharedGpuLockPath => Path.Combine(StateHome, "agent-tooling", "gpu-inference.lock");
 
     private static string DefaultHome
     {
@@ -39,4 +40,7 @@ public static class SantaPaths
             return current;
         }
     }
+
+    private static string StateHome => Environment.GetEnvironmentVariable("XDG_STATE_HOME") ??
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "state");
 }

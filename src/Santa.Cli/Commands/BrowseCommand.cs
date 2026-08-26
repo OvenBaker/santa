@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Santa.Cli;
 using Santa.Core.Embedding;
 using Santa.Core.Search;
 using Santa.Core.Sessions;
@@ -21,6 +22,11 @@ public sealed class BrowseCommand : Command<BrowseCommand.Settings>
         [CommandOption("--keyword-only")]
         public bool KeywordOnly { get; init; }
 
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
+
         [CommandOption("-q|--query <TEXT>")]
         [Description("Initial query (skip the prompt).")]
         public string? Query { get; init; }
@@ -28,16 +34,20 @@ public sealed class BrowseCommand : Command<BrowseCommand.Settings>
 
     protected override int Execute(CommandContext context, Settings s, CancellationToken ct)
     {
+        if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
 
         IEmbedder? embedder = null;
-        if (!s.KeywordOnly)
+        if (provider is not null)
         {
-            var cfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var cfg = InferenceProviderOption.Apply(
+                EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(cfg.OnnxPath) && File.Exists(cfg.VocabPath) && db.TryEnableVec(cfg.Dimensions))
             {
                 try { embedder = new LocalEmbedder(cfg); }
-                catch { embedder = null; }
+                catch (Exception ex) { return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex); }
             }
         }
 

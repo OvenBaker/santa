@@ -28,14 +28,34 @@ Needs the **.NET 10 SDK** (the build publishes a single-file binary; the runtime
 framework-dependent, so it's small).
 
 ```bash
-./install.sh                 # dotnet publish → ~/.local/bin/santa
-santa refresh                # first run downloads the embed + rerank models
+./install.sh                         # GPU ONNX Runtime by default
+santa models download
+santa refresh
 ```
 
-On first `refresh`, santa pulls two small ONNX models (embedding + reranker) from
-HuggingFace and the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension
-from GitHub, then works fully offline. A CUDA build of onnxruntime ships in the box
-and is used automatically if a GPU is present; otherwise it falls back to CPU.
+`santa models download` pulls two ONNX models (embedding + reranker) from HuggingFace
+and the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension from GitHub,
+then works fully offline. CUDA is the default inference provider.
+
+Before loading a CUDA model, Santa requires three consecutive idle readings from
+`nvidia-smi` (at most 10% utilization and 25% VRAM in use). Santa and Shepherd share
+`~/.local/state/agent-tooling/gpu-inference.lock`, so their inference passes cannot
+compete. A busy or unavailable GPU defers the command; it never silently falls back
+to CPU. Use an explicit CPU build and provider when wanted:
+
+```bash
+SANTA_ONNX_RUNTIME_FLAVOR=cpu ./install.sh
+santa devices --provider cpu
+santa refresh --provider cpu
+```
+
+CUDA embedding is memory-bounded: batches are limited by their padded token area,
+the embedding allocator is capped at 7 GiB, and the reranker allocator at 2 GiB.
+This keeps a single maximum-length transcript turn from padding a large batch and
+exhausting a 12 GiB GPU.
+
+If CUDA initialization fails, the command fails rather than silently continuing with
+BM25. Use `--provider keyword-only` when BM25-only operation is what you intended.
 
 ## The TUI
 
@@ -73,8 +93,9 @@ terminal tab, or dropped straight into a [cockpit](https://github.com/OvenBaker/
 pane if you launched the TUI from there (`cockpit --santa`). Theme and layout choices
 persist across runs.
 
-Flags: `--keyword-only` (BM25-only, skip embeddings) · `--no-refresh` (skip the
-launch-time index) · `--device <id>` (pick a GPU).
+Flags: `--provider cpu|cuda|keyword-only` · `--keyword-only` (compatibility alias
+for BM25-only) · `--no-refresh` (skip the launch-time index) · `--device <id>`
+(pick a GPU when using CUDA).
 
 ## Where state lives
 
@@ -93,7 +114,7 @@ Everything the TUI does, minus the UI — for piping, scripts, or muscle memory.
 | Command | Does |
 |---------|------|
 | `santa tui` | The full-screen interface above. |
-| `santa refresh` | Incrementally index new/changed sessions. |
+| `santa refresh` | Incrementally index new/changed sessions; CUDA inference when the GPU is idle. |
 | `santa query <text>` | Hybrid semantic + keyword search across all history. |
 | `santa recent` | Recently-touched sessions, grouped by project. |
 | `santa related <id>` | Sessions semantically near a given one. |

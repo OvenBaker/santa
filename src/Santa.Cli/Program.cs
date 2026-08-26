@@ -39,7 +39,7 @@ app.Configure(config =>
     config.AddCommand<TuiCommand>("tui")
         .WithDescription("Full-screen interactive TUI (Browse + Search tabs).");
     config.AddCommand<DevicesCommand>("devices")
-        .WithDescription("Probe ONNX Runtime providers and confirm CUDA device pinning.");
+        .WithDescription("Report the selected ONNX Runtime provider and device readiness.");
     config.AddCommand<ModelsCommand>("models")
         .WithDescription("Manage embedding model + sqlite-vec extension. Actions: status | download.");
 });

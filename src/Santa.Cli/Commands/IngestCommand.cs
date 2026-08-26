@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Santa.Cli;
 using Santa.Core.Embedding;
 using Santa.Core.Ingest;
 using Santa.Core.Storage;
@@ -40,8 +41,13 @@ public sealed class IngestCommand : AsyncCommand<IngestCommand.Settings>
         public string? Db { get; init; }
 
         [CommandOption("--embed")]
-        [Description("Compute embeddings + write to chunk_vec. Requires CUDA + downloaded model + sqlite-vec.")]
+        [Description("Compute embeddings + write to chunk_vec using the selected provider.")]
         public bool Embed { get; init; }
+
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
 
         [CommandOption("--metadata-only")]
         [Description("Refresh per-session metadata (cwd, git_branch, derived_branches, …) without re-chunking or re-embedding.")]
@@ -62,6 +68,14 @@ public sealed class IngestCommand : AsyncCommand<IngestCommand.Settings>
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken cancellationToken)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!InferenceProviderOption.TryResolve(s.Provider, false, out var provider)) return 2;
+        if (s.Embed && provider is null)
+        {
+            AnsiConsole.MarkupLine("[red]--embed cannot be used with --provider keyword-only.[/]");
+            return 2;
+        }
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        using var gpuLeaseScope = gpuLease;
         var projects = s.Projects ?? Path.Combine(home, ".claude", "projects");
 
         if (!Directory.Exists(projects))
@@ -83,9 +97,10 @@ public sealed class IngestCommand : AsyncCommand<IngestCommand.Settings>
         // Auto-enable embedding when the prerequisites are clearly in place AND there's evidence
         // we've embedded before. Stops new chunks from silently going un-embedded on subsequent
         // ingests after the user opted into embeddings the first time.
-        var embedderCfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
-        bool embedRequested = s.Embed;
+        var embedderCfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot);
+        bool embedRequested = s.Embed && !s.MetadataOnly;
         if (!embedRequested
+            && !s.MetadataOnly && provider is not null
             && File.Exists(embedderCfg.OnnxPath) && File.Exists(embedderCfg.VocabPath)
             && db.TryEnableVec(embedderCfg.Dimensions)
             && new Core.Storage.VectorRepository(db.Connection).HasEmbeddings(embedderCfg.ModelId))
@@ -97,13 +112,22 @@ public sealed class IngestCommand : AsyncCommand<IngestCommand.Settings>
         IEmbedder? embedder = null;
         if (embedRequested)
         {
-            embedder = new LocalEmbedder(embedderCfg);
+            try
+            {
+                embedder = new LocalEmbedder(
+                    InferenceProviderOption.Apply(embedderCfg, provider!.Value, s.DeviceId));
+            }
+            catch (Exception ex)
+            {
+                return InferenceProviderOption.ReportInitializationFailure(provider!.Value, ex);
+            }
             if (!db.TryEnableVec(embedderCfg.Dimensions))
             {
                 AnsiConsole.MarkupLine("[red]sqlite-vec extension failed to load. Run `santa models download`.[/]");
                 return 3;
             }
-            AnsiConsole.MarkupLineInterpolated($"[grey]embedder:[/] {embedder.ModelId} (dim={embedder.Dimensions}, device={s.DeviceId})");
+            AnsiConsole.MarkupLineInterpolated(
+                $"[grey]embedder:[/] {embedder.ModelId} (dim={embedder.Dimensions}, provider={provider!.Value.ToString().ToLowerInvariant()}{(provider == InferenceProvider.Cuda ? $", device={s.DeviceId}" : "")})");
         }
 
         var svc = new IngestService(db);

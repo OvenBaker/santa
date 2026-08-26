@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Microsoft.Data.Sqlite;
+using Santa.Cli;
 using Santa.Core.Embedding;
 using Santa.Core.Ingest;
 using Santa.Core.Sessions;
@@ -28,6 +29,11 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
         [CommandOption("--device <ID>")]
         public int DeviceId { get; init; } = 0;
 
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
+
         [CommandOption("--no-summary")]
         [Description("Skip the summarisation pass.")]
         public bool NoSummary { get; init; }
@@ -44,6 +50,7 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct)
     {
         var startedAt = DateTimeOffset.Now;
+        if (!InferenceProviderOption.TryResolve(s.Provider, false, out var provider)) return 2;
         var dbPath = s.Db ?? Database.DefaultPath;
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var projects = Path.Combine(home, ".claude", "projects");
@@ -58,6 +65,16 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
         if (refreshLock is null)
             return ReportSkipped(s.Quiet, startedAt, "refresh-already-running");
 
+        GpuCourtesyLease? gpuLease = null;
+        if (provider == InferenceProvider.Cuda)
+        {
+            var acquisition = await new GpuCourtesyGate(s.DeviceId).TryAcquireAsync(ct);
+            if (acquisition.Lease is null)
+                return ReportSkipped(s.Quiet, startedAt, acquisition.Reason.Replace(' ', '-').ToLowerInvariant());
+            gpuLease = acquisition.Lease;
+        }
+        using var gpuLeaseScope = gpuLease;
+
         try
         {
             // Refresh is an unattended best-effort job. Do not let Microsoft.Data.Sqlite's normal
@@ -69,12 +86,21 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
             IEmbedder? embedder = null;
             try
             {
-                var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
-                if (File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
+                var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot);
+                if (provider is not null
+                    && File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
                     && db.TryEnableVec(ecfg.Dimensions)
                     && new VectorRepository(db.Connection).HasEmbeddings(ecfg.ModelId))
                 {
-                    try { embedder = new LocalEmbedder(ecfg); } catch { embedder = null; }
+                    try
+                    {
+                        embedder = new LocalEmbedder(
+                            InferenceProviderOption.Apply(ecfg, provider.Value, s.DeviceId));
+                    }
+                    catch (Exception ex)
+                    {
+                        return ReportFailed(s.Quiet, startedAt, provider.Value, ex);
+                    }
                 }
 
                 var stats = new IngestService(db).Run(new IngestOptions(
@@ -162,6 +188,21 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
         else
             AnsiConsole.MarkupLineInterpolated($"[yellow]skipped:[/] {reason} [grey]({elapsed:F1}s)[/]");
         return 0;
+    }
+
+    private static int ReportFailed(
+        bool quiet,
+        DateTimeOffset startedAt,
+        InferenceProvider provider,
+        Exception ex)
+    {
+        var elapsed = (DateTimeOffset.Now - startedAt).TotalSeconds;
+        if (quiet)
+            Console.Error.WriteLine(
+                $"{startedAt:O} failed provider={provider.ToString().ToLowerInvariant()} error={ex.Message.ReplaceLineEndings(" ")} elapsed={elapsed:F1}s");
+        else
+            InferenceProviderOption.ReportInitializationFailure(provider, ex);
+        return 3;
     }
 
     private static bool AnyExistingSummary(Database db)

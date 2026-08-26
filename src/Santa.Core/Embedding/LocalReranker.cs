@@ -31,11 +31,8 @@ public sealed class LocalReranker : IReranker
         if (!File.Exists(cfg.VocabPath))
             throw new FileNotFoundException($"BERT vocab not found at {cfg.VocabPath}.");
 
-        var opts = new SessionOptions();
-        opts.AppendExecutionProvider_CUDA(cfg.DeviceId);
-        opts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-        opts.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR;
-
+        using var opts = InferenceRuntime.CreateSessionOptions(
+            cfg.Provider, cfg.DeviceId, cfg.CudaMemoryLimitBytes);
         _session = new InferenceSession(cfg.OnnxPath, opts);
 
         using var fs = File.OpenRead(cfg.VocabPath);
@@ -56,19 +53,41 @@ public sealed class LocalReranker : IReranker
 
         var scores = new float[documents.Count];
 
-        for (int batchStart = 0; batchStart < documents.Count; batchStart += _cfg.BatchSize)
+        var encodedDocuments = new List<int>[documents.Count];
+        for (int i = 0; i < documents.Count; i++)
         {
-            var batchEnd = Math.Min(batchStart + _cfg.BatchSize, documents.Count);
+            var docIds = _tokenizer.EncodeToIds(documents[i], addSpecialTokens: false,
+                considerPreTokenization: true, considerNormalization: true).ToList();
+            if (docIds.Count > docBudget) docIds = docIds.Take(docBudget).ToList();
+            encodedDocuments[i] = docIds;
+        }
+
+        for (int batchStart = 0; batchStart < documents.Count;)
+        {
+            var batchEnd = batchStart;
+            int maxLen = 0;
+            while (batchEnd < documents.Count && batchEnd - batchStart < _cfg.BatchSize)
+            {
+                var sequenceLength = queryIds.Count + encodedDocuments[batchEnd].Count + 3;
+                var candidateMax = Math.Max(maxLen, sequenceLength);
+                var candidateSize = batchEnd - batchStart + 1;
+                if (candidateSize > 1 && candidateSize * candidateMax > _cfg.MaxBatchTokens)
+                    break;
+                maxLen = candidateMax;
+                batchEnd++;
+            }
+            if (batchEnd == batchStart)
+            {
+                batchEnd++;
+                maxLen = queryIds.Count + encodedDocuments[batchStart].Count + 3;
+            }
+
             var batchSize = batchEnd - batchStart;
 
-            // Encode each doc + truncate
             var seqs = new List<(List<int> Ids, List<int> Types)>(batchSize);
-            int maxLen = 0;
             for (int i = 0; i < batchSize; i++)
             {
-                var docIds = _tokenizer.EncodeToIds(documents[batchStart + i], addSpecialTokens: false,
-                    considerPreTokenization: true, considerNormalization: true).ToList();
-                if (docIds.Count > docBudget) docIds = docIds.Take(docBudget).ToList();
+                var docIds = encodedDocuments[batchStart + i];
 
                 var ids = new List<int>(_cfg.MaxTokens) { CLS };
                 var types = new List<int>(_cfg.MaxTokens) { 0 };
@@ -78,7 +97,6 @@ public sealed class LocalReranker : IReranker
                 ids.Add(SEP);              types.Add(1);
 
                 seqs.Add((ids, types));
-                if (ids.Count > maxLen) maxLen = ids.Count;
             }
 
             var inputIds  = new long[batchSize * maxLen];
@@ -109,6 +127,8 @@ public sealed class LocalReranker : IReranker
 
             for (int i = 0; i < batchSize; i++)
                 scores[batchStart + i] = logits[i, 0];
+
+            batchStart = batchEnd;
         }
 
         return scores;

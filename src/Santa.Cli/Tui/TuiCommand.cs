@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Santa.Cli;
 using Santa.Core.Embedding;
 using Santa.Core.Ingest;
 using Santa.Core.Storage;
@@ -21,6 +22,11 @@ public sealed class TuiCommand : Command<TuiCommand.Settings>
         [Description("Disable embeddings + reranker (search tab will use BM25 only).")]
         public bool KeywordOnly { get; init; }
 
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
+
         [CommandOption("--no-refresh")]
         [Description("Skip the silent incremental ingest at TUI startup.")]
         public bool NoRefresh { get; init; }
@@ -28,24 +34,44 @@ public sealed class TuiCommand : Command<TuiCommand.Settings>
 
     protected override int Execute(CommandContext context, Settings s, CancellationToken ct)
     {
+        if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
 
-        if (!s.NoRefresh) RefreshIndex(db, s.DeviceId);
+        if (!s.NoRefresh)
+        {
+            try { RefreshIndex(db, provider, s.DeviceId); }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[red]startup refresh failed:[/] {Markup.Escape(ex.Message)}");
+                return 3;
+            }
+        }
 
         IEmbedder? embedder = null;
         IReranker? reranker = null;
-        if (!s.KeywordOnly)
+        if (provider is not null)
         {
-            var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var ecfg = InferenceProviderOption.Apply(
+                EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath) && db.TryEnableVec(ecfg.Dimensions))
             {
-                try { embedder = new LocalEmbedder(ecfg); } catch { embedder = null; }
+                try { embedder = new LocalEmbedder(ecfg); }
+                catch (Exception ex) { return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex); }
             }
 
-            var rcfg = RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var rcfg = InferenceProviderOption.Apply(
+                RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(rcfg.OnnxPath) && File.Exists(rcfg.VocabPath))
             {
-                try { reranker = new LocalReranker(rcfg); } catch { reranker = null; }
+                try { reranker = new LocalReranker(rcfg); }
+                catch (Exception ex)
+                {
+                    embedder?.Dispose();
+                    return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex);
+                }
             }
         }
 
@@ -67,7 +93,7 @@ public sealed class TuiCommand : Command<TuiCommand.Settings>
     /// embeddings are configured (mirrors IngestCommand's heuristic). Skips summarisation
     /// because that can take many minutes — the cron path is for that.
     /// </summary>
-    private static void RefreshIndex(Database db, int deviceId)
+    private static void RefreshIndex(Database db, InferenceProvider? provider, int deviceId)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var projects = Path.Combine(home, ".claude", "projects");
@@ -77,12 +103,14 @@ public sealed class TuiCommand : Command<TuiCommand.Settings>
         IEmbedder? embedder = null;
         try
         {
-            var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = deviceId };
-            if (File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
+            var ecfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot);
+            if (provider is not null
+                && File.Exists(ecfg.OnnxPath) && File.Exists(ecfg.VocabPath)
                 && db.TryEnableVec(ecfg.Dimensions)
                 && new Core.Storage.VectorRepository(db.Connection).HasEmbeddings(ecfg.ModelId))
             {
-                try { embedder = new LocalEmbedder(ecfg); } catch { embedder = null; }
+                embedder = new LocalEmbedder(
+                    InferenceProviderOption.Apply(ecfg, provider.Value, deviceId));
             }
 
             AnsiConsole.Progress()

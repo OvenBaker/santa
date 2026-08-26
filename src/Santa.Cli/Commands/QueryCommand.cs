@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Santa.Cli;
 using Santa.Cli.Theming;
 using Santa.Core.Embedding;
 using Santa.Core.Search;
@@ -32,6 +33,11 @@ public sealed class QueryCommand : Command<QueryCommand.Settings>
         [Description("Skip vector search even if a model is configured.")]
         public bool KeywordOnly { get; init; }
 
+        [CommandOption("--provider <PROVIDER>")]
+        [Description("Inference provider: cuda (default), cpu, or keyword-only.")]
+        [DefaultValue("cuda")]
+        public string Provider { get; init; } = "cuda";
+
         [CommandOption("--no-rerank")]
         [Description("Skip cross-encoder reranking (default: rerank if model is downloaded).")]
         public bool NoRerank { get; init; }
@@ -50,32 +56,38 @@ public sealed class QueryCommand : Command<QueryCommand.Settings>
 
     protected override int Execute(CommandContext context, Settings s, CancellationToken cancellationToken)
     {
+        if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
 
         IEmbedder? embedder = null;
-        if (!s.KeywordOnly)
+        if (provider is not null)
         {
-            var cfg = EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var cfg = InferenceProviderOption.Apply(
+                EmbedderConfig.NomicV15(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(cfg.OnnxPath) && File.Exists(cfg.VocabPath) && db.TryEnableVec(cfg.Dimensions))
             {
                 try { embedder = new LocalEmbedder(cfg); }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLineInterpolated($"[yellow]vec disabled:[/] {Markup.Escape(ex.Message)}");
+                    return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex);
                 }
             }
         }
 
         IReranker? reranker = null;
-        if (!s.NoRerank)
+        if (provider is not null && !s.NoRerank)
         {
-            var rcfg = RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot) with { DeviceId = s.DeviceId };
+            var rcfg = InferenceProviderOption.Apply(
+                RerankerConfig.MsMarcoMiniLmL12(EmbedderConfig.DefaultRoot), provider.Value, s.DeviceId);
             if (File.Exists(rcfg.OnnxPath) && File.Exists(rcfg.VocabPath))
             {
                 try { reranker = new LocalReranker(rcfg); }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLineInterpolated($"[yellow]reranker disabled:[/] {Markup.Escape(ex.Message)}");
+                    embedder?.Dispose();
+                    return InferenceProviderOption.ReportInitializationFailure(provider.Value, ex);
                 }
             }
         }

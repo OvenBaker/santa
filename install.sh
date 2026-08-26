@@ -5,9 +5,18 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIST="$REPO/dist"
 BIN_DIR="${SANTA_BIN_DIR:-$HOME/.local/bin}"
 LINK="$BIN_DIR/santa"
+ONNX_FLAVOR="${SANTA_ONNX_RUNTIME_FLAVOR:-gpu}"
+
+if [ "$ONNX_FLAVOR" != "cpu" ] && [ "$ONNX_FLAVOR" != "gpu" ]; then
+    echo "error: SANTA_ONNX_RUNTIME_FLAVOR must be cpu or gpu" >&2
+    exit 2
+fi
+
+# Keep CPU and GPU native runtimes in separate publish directories. Publishing on top of
+# the other flavor can otherwise leave stale ONNX provider libraries behind.
+DIST="$REPO/dist/$ONNX_FLAVOR"
 
 # One-time state migration for installs predating the santa-claude → santa rename.
 STATE_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -22,6 +31,7 @@ dotnet publish "$REPO/src/Santa.Cli" \
     -c Release \
     -r linux-x64 \
     --self-contained false \
+    -p:SantaOnnxRuntimeFlavor="$ONNX_FLAVOR" \
     -p:PublishSingleFile=true \
     -p:DebugType=embedded \
     -o "$DIST" \
@@ -34,7 +44,7 @@ ln -sf "$DIST/santa" "$LINK"
 rm -f "$BIN_DIR/santa-claude"
 
 echo
-echo "✓ installed: $BIN_DIR/santa -> $DIST/santa"
+echo "✓ installed ($ONNX_FLAVOR): $BIN_DIR/santa -> $DIST/santa"
 
 if ! command -v santa >/dev/null 2>&1; then
     echo
