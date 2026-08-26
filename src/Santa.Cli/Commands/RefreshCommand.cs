@@ -61,17 +61,26 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
             return 2;
         }
 
+        string? deferredEmbedding = null;
         using var refreshLock = TryAcquireRefreshLock(dbPath);
         if (refreshLock is null)
             return ReportSkipped(s.Quiet, startedAt, "refresh-already-running");
 
+        // The GPU gates EMBEDDING ONLY. Ingest is pure file/SQLite work and summarisation runs `claude -p`
+        // on the Max plan — neither touches the card. Refusing the whole run when the lease is unavailable is
+        // how a cron PATH that could not see nvidia-smi silently stopped indexing for 124 consecutive runs,
+        // taking every cockpit pane title down with it (2026-08-25). A busy or absent GPU now costs vector
+        // freshness for this run and nothing else.
         GpuCourtesyLease? gpuLease = null;
         if (provider == InferenceProvider.Cuda)
         {
             var acquisition = await new GpuCourtesyGate(s.DeviceId).TryAcquireAsync(ct);
             if (acquisition.Lease is null)
-                return ReportSkipped(s.Quiet, startedAt, acquisition.Reason.Replace(' ', '-').ToLowerInvariant());
-            gpuLease = acquisition.Lease;
+            {
+                deferredEmbedding = acquisition.Reason;
+                provider = null;
+            }
+            else gpuLease = acquisition.Lease;
         }
         using var gpuLeaseScope = gpuLease;
 
@@ -144,13 +153,21 @@ public sealed class RefreshCommand : AsyncCommand<RefreshCommand.Settings>
                 }
 
                 var elapsed = (DateTimeOffset.Now - startedAt).TotalSeconds;
+                // A run that skipped embedding must SAY so: it is otherwise indistinguishable in the log
+                // from a complete one, and the vector index quietly falls behind.
+                var embedNote = deferredEmbedding is null
+                    ? string.Empty
+                    : $" embedding=deferred:{deferredEmbedding.Replace(' ', '-').ToLowerInvariant()}";
                 if (s.Quiet)
                 {
                     Console.WriteLine(
-                        $"{startedAt:O} ok ingested={stats.SessionsTouched} chunks+={stats.ChunksWritten} summarised={summarised} elapsed={elapsed:F1}s");
+                        $"{startedAt:O} ok ingested={stats.SessionsTouched} chunks+={stats.ChunksWritten} summarised={summarised}{embedNote} elapsed={elapsed:F1}s");
                 }
                 else
                 {
+                    if (deferredEmbedding is not null)
+                        AnsiConsole.MarkupLineInterpolated(
+                            $"[yellow]embedding deferred:[/] {Markup.Escape(deferredEmbedding)} — index updated without new vectors");
                     AnsiConsole.MarkupLineInterpolated($"[grey]done in {elapsed:F1}s[/]");
                 }
                 return 0;

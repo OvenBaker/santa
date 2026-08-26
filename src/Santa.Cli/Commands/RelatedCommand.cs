@@ -59,7 +59,12 @@ public sealed class RelatedCommand : Command<RelatedCommand.Settings>
     protected override int Execute(CommandContext context, Settings s, CancellationToken cancellationToken)
     {
         if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
-        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        // "more like this" IS the vector query, so there is nothing to degrade to — refuse where the
+        // operator can read it rather than exiting 0 with no rows, which Alt-f showed as "no related
+        // sessions found" whenever the refresh cron happened to hold the lease (2026-08-26).
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease,
+                out var gpuReason, announce: false))
+            return InferenceProviderOption.ReportGpuRequired("finding related sessions", gpuReason);
         using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
         var lookup = new SessionLookup(db);

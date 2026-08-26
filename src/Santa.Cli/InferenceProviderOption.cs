@@ -64,15 +64,42 @@ internal static class InferenceProviderOption
         return 3;
     }
 
+    /// <summary>
+    /// Refuse a capability that genuinely cannot run without CUDA, VISIBLY. Commands like `related` are
+    /// vector-only, so there is nothing honest to degrade to — but they are launched from cockpit's
+    /// display-popup, which closes the instant the process exits, so a printed line alone is a flash the
+    /// operator cannot read. Hold for a keypress when a terminal is actually attached; stay silent and
+    /// non-zero when the caller is capturing output (--porcelain), where a prompt would hang the pipeline.
+    /// </summary>
+    public static int ReportGpuRequired(string capability, string reason)
+    {
+        AnsiConsole.MarkupLineInterpolated(
+            $"[red]{capability} requires CUDA[/], and the GPU is presently unavailable: {Markup.Escape(reason)}");
+        if (!Console.IsInputRedirected && !Console.IsOutputRedirected)
+        {
+            AnsiConsole.Markup("[grey]press any key to exit[/]");
+            try { Console.ReadKey(intercept: true); } catch (InvalidOperationException) { /* no console */ }
+            AnsiConsole.WriteLine();
+        }
+        return 4;
+    }
+
     public static bool TryAcquireGpuCourtesy(InferenceProvider? provider, int deviceId,
         out GpuCourtesyLease? lease)
+        => TryAcquireGpuCourtesy(provider, deviceId, out lease, out _, announce: true);
+
+    /// <summary>As above, but hands the caller the deferral reason so it can refuse in its own words.</summary>
+    public static bool TryAcquireGpuCourtesy(InferenceProvider? provider, int deviceId,
+        out GpuCourtesyLease? lease, out string reason, bool announce = true)
     {
         lease = null;
+        reason = string.Empty;
         if (provider != InferenceProvider.Cuda) return true;
         var acquisition = new GpuCourtesyGate(deviceId).TryAcquireAsync().GetAwaiter().GetResult();
         lease = acquisition.Lease;
         if (lease is not null) return true;
-        AnsiConsole.MarkupLineInterpolated($"[yellow]deferred:[/] {Markup.Escape(acquisition.Reason)}");
+        reason = acquisition.Reason;
+        if (announce) AnsiConsole.MarkupLineInterpolated($"[yellow]deferred:[/] {Markup.Escape(acquisition.Reason)}");
         return false;
     }
 }

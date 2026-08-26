@@ -57,7 +57,10 @@ public sealed class QueryCommand : Command<QueryCommand.Settings>
     protected override int Execute(CommandContext context, Settings s, CancellationToken cancellationToken)
     {
         if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
-        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        // Hybrid search has an honest fallback — BM25 alone still answers the question — so a held lease
+        // narrows the search rather than ending it.
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease))
+            provider = null;
         using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
 
