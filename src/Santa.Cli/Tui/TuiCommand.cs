@@ -35,7 +35,12 @@ public sealed class TuiCommand : Command<TuiCommand.Settings>
     protected override int Execute(CommandContext context, Settings s, CancellationToken ct)
     {
         if (!InferenceProviderOption.TryResolve(s.Provider, s.KeywordOnly, out var provider)) return 2;
-        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease)) return 0;
+        // The GPU is shared with the hourly refresh and with Shepherd, so the courtesy lease is routinely
+        // held by someone else. Browse needs no embeddings at all and Search degrades to BM25, so a deferred
+        // lease drops this session to keyword-only rather than ending it: returning here printed one line and
+        // exited 0, which inside cockpit's display-popup is a flash the operator cannot read (2026-08-25).
+        if (!InferenceProviderOption.TryAcquireGpuCourtesy(provider, s.DeviceId, out var gpuLease))
+            provider = null;
         using var gpuLeaseScope = gpuLease;
         using var db = Database.Open(s.Db ?? Database.DefaultPath);
 
