@@ -13,6 +13,10 @@ namespace Santa.Core.Jsonl;
 ///   • turn_context   → carries cwd (non-conversational; a fallback for session_meta)
 ///   • event_msg/user_message  → a real user prompt (Type="user")
 ///   • event_msg/agent_message → assistant prose (Type="assistant")
+///   • event_msg/item_completed → the SAME two turns in the paginated history format Codex adopted
+///     at ~0.147 (session_meta.history_mode "paginated"), where item.type is UserMessage/AgentMessage.
+///     Rollouts in that format carry no user_message/agent_message at all, so without this branch they
+///     projected zero turns and never entered the index (2026-08-25).
 /// Everything else (response_item tool I/O, token_count, task_started/complete) is surfaced with
 /// its raw type and ignored by TurnBuilder.
 /// </summary>
@@ -119,6 +123,25 @@ internal static class CodexParser
                         isUser ? "user" : "assistant", null, null, null, ts, null, null, null,
                         isUser ? "user" : "assistant", blocks, root.Clone());
                 }
+                // Paginated history (Codex ≥ ~0.147): the turn arrives as a completed ITEM instead of a
+                // message event. Only the two conversational item types become turns; Reasoning,
+                // CommandExecution, FileChange and friends stay non-conversational, exactly as the tool
+                // I/O of the legacy format does.
+                if (pt == "item_completed" && hasPayload
+                    && payload.TryGetProperty("item", out var item)
+                    && item.ValueKind == JsonValueKind.Object)
+                {
+                    var itemType = GetString(item, "type");
+                    var isUserItem = string.Equals(itemType, "UserMessage", StringComparison.OrdinalIgnoreCase);
+                    var isAgentItem = string.Equals(itemType, "AgentMessage", StringComparison.OrdinalIgnoreCase);
+                    if (isUserItem || isAgentItem)
+                    {
+                        var blocks = ReadItemText(item);
+                        return new JsonlEvent(
+                            isUserItem ? "user" : "assistant", GetString(item, "id"), null, null, ts,
+                            null, null, null, isUserItem ? "user" : "assistant", blocks, root.Clone());
+                    }
+                }
                 // token_count, task_started, task_complete, … — keep for offset continuity, ignored downstream.
                 return new JsonlEvent("event_msg", null, null, null, ts, null, null, null, null,
                     Array.Empty<ContentBlock>(), root.Clone());
@@ -128,6 +151,26 @@ internal static class CodexParser
                 return new JsonlEvent(lineType, null, null, null, ts, null, null, null, null,
                     Array.Empty<ContentBlock>(), root.Clone());
         }
+    }
+
+    /// <summary>
+    /// Text blocks of a paginated `item_completed` item. The block discriminator is spelled
+    /// inconsistently by the producer — a UserMessage carries "text", an AgentMessage "Text" — so the
+    /// match is case-insensitive rather than trusting either spelling.
+    /// </summary>
+    private static IReadOnlyList<ContentBlock> ReadItemText(JsonElement item)
+    {
+        if (!item.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            return Array.Empty<ContentBlock>();
+        var blocks = new List<ContentBlock>();
+        foreach (var block in content.EnumerateArray())
+        {
+            if (block.ValueKind != JsonValueKind.Object) continue;
+            if (!string.Equals(GetString(block, "type"), "text", StringComparison.OrdinalIgnoreCase)) continue;
+            var text = GetString(block, "text");
+            if (!string.IsNullOrEmpty(text)) blocks.Add(new ContentBlock("text", text));
+        }
+        return blocks.Count == 0 ? Array.Empty<ContentBlock>() : blocks;
     }
 
     private static string? GetString(JsonElement obj, string name)
