@@ -57,6 +57,19 @@ exhausting a 12 GiB GPU.
 If CUDA initialization fails, the command fails rather than silently continuing with
 BM25. Use `--provider keyword-only` when BM25-only operation is what you intended.
 
+### Scheduled refresh
+
+An hourly cron keeps the index (and therefore session titles, which cockpit reads) current:
+
+```
+0 * * * * PATH=$HOME/.local/bin:/usr/bin:/bin:/usr/lib/wsl/lib santa refresh --quiet --provider cuda >> ~/.local/share/santa/refresh.log 2>&1
+```
+
+`/usr/lib/wsl/lib` is load-bearing on WSL: that is where `nvidia-smi` lives, and the CUDA
+courtesy gate skips the **entire** run — summarisation included — when it cannot find it.
+Omitting the path silently stops all indexing and every downstream title goes stale; check
+`refresh.log` for `skipped reason=nvidia-smi-unavailable` if titles stop updating.
+
 ## The TUI
 
 `santa tui` is the main interface — a full-screen, keyboard-driven browser over your
