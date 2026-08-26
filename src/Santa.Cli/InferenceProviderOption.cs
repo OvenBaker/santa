@@ -73,13 +73,14 @@ internal static class InferenceProviderOption
     /// </summary>
     public static int ReportGpuRequired(string capability, string reason)
     {
-        AnsiConsole.MarkupLineInterpolated(
-            $"[red]{capability} requires CUDA[/], and the GPU is presently unavailable: {Markup.Escape(reason)}");
+        // STDERR, deliberately: stdout is the data channel (--porcelain), so a diagnostic written there is
+        // both invisible to the caller and corrupting to whatever parses the rows.
+        Console.Error.WriteLine($"{capability} requires CUDA, and the GPU is presently unavailable: {reason}");
         if (!Console.IsInputRedirected && !Console.IsOutputRedirected)
         {
-            AnsiConsole.Markup("[grey]press any key to exit[/]");
+            Console.Error.Write("press any key to exit");
             try { Console.ReadKey(intercept: true); } catch (InvalidOperationException) { /* no console */ }
-            AnsiConsole.WriteLine();
+            Console.Error.WriteLine();
         }
         return 4;
     }
