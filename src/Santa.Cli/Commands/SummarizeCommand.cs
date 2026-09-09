@@ -77,7 +77,9 @@ public sealed class SummarizeCommand : AsyncCommand<SummarizeCommand.Settings>
             sessions = sessions.Where(x => summarizer.NeedsSummary(x.Id, x.TurnCount)).ToList();
 
         var batch = sessions.Take(s.Max).ToList();
-        var backend = LlmRunner.CodexSelected ? $"codex/{CodexCliRunner.Model}" : s.Model;
+        var backend = LlmRunner.CodexSelected
+            ? $"codex/{CodexCliRunner.Model}"
+            : ClaudeCliRunner.Resolve(s.Model);
         AnsiConsole.MarkupLineInterpolated(
             $"summarising [bold]{batch.Count}[/] session(s) with [cyan]{backend}[/] · concurrency={s.Concurrency}");
 
