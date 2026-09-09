@@ -20,7 +20,9 @@ public static class LlmRunner
 
     /// <summary>The backend model id that will actually run this request (for DB records/logs).</summary>
     public static string ModelFor(ClaudeRunRequest req) =>
-        (CodexSelected && req.AllowedTools.Count == 0) ? CodexCliRunner.Model : req.Model;
+        (CodexSelected && req.AllowedTools.Count == 0)
+            ? CodexCliRunner.Model
+            : ClaudeCliRunner.ModelFor(req);
 
     public static Task<ClaudeRunResult> RunAsync(ClaudeRunRequest req, CancellationToken ct = default)
         => (CodexSelected && req.AllowedTools.Count == 0)

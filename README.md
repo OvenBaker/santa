@@ -120,6 +120,21 @@ The index is built from *your* transcripts and is never committed or shared.
 > `~/.local/share/santa-claude/` state dir automatically, and the binary still
 > honours `SANTA_CLAUDE_HOME` as a deprecated alias for `SANTA_HOME`.
 
+## Which model runs the summaries
+
+Summarisation and classification are routed by `SANTA_SUMMARIZER`, and each backend names
+its model explicitly — neither path inherits the underlying CLI's own default.
+
+| Variable | Default | Does |
+|----------|---------|------|
+| `SANTA_SUMMARIZER` | `codex` | Backend for tool-less work (summaries, non-agent classification): `codex` or `claude`. Agent-mode recipes always run on Claude regardless. |
+| `SANTA_CLAUDE_MODEL` | `claude-haiku-4-5` | Model for the `claude -p` path when a recipe or `--model` names none. A recipe that does name one still wins. |
+| `SANTA_CODEX_MODEL` | `gpt-5.5` | Model for the `codex exec` path. Overrides the per-request model outright — Claude model names mean nothing to Codex. |
+
+`--model` is always passed to `claude -p`. An empty value resolves to `SANTA_CLAUDE_MODEL`
+rather than falling through to whatever default the CLI happens to ship, so the model in the
+`classifications` and `summaries` tables is always the one that actually ran.
+
 ## Scriptable commands
 
 Everything the TUI does, minus the UI — for piping, scripts, or muscle memory.
