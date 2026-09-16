@@ -8,6 +8,10 @@ You talk to a lot of agents. santa makes that history searchable: *"that postgre
 migration we argued about"*, *"the auth refactor from last week"* — find the session,
 read it, and resume it where you left off.
 
+For the product's purpose, scope, and ownership boundaries, see the
+[current vision](docs/vision.md). The [documentation index](docs/README.md) separates
+current product documents from contextual references.
+
 The main way to use santa is its full-screen **TUI**:
 
 ```bash
