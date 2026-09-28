@@ -62,7 +62,18 @@ public static class LiveSessionDetector
             if (cwd is null) continue;
 
             var encoded = EncodeCwdForProjectDir(cwd);
-            var projectDir = Path.Combine(projectsRoot, encoded);
+            // Read only the config-directory variable; never expose process credentials.
+            var processRoot = projectsRoot;
+            try
+            {
+                var entry = File.ReadAllText(Path.Combine(pidDir, "environ")).Split('\0')
+                    .FirstOrDefault(v => v.StartsWith("CLAUDE_CONFIG_DIR="));
+                if (entry is not null && entry.Length > "CLAUDE_CONFIG_DIR=".Length)
+                    processRoot = Path.Combine(entry["CLAUDE_CONFIG_DIR=".Length..], "projects");
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            var projectDir = Path.Combine(processRoot, encoded);
             if (!Directory.Exists(projectDir)) continue;
 
             var liveId = MostRecentJsonlSessionId(projectDir);

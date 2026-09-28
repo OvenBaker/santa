@@ -171,3 +171,19 @@ package — noted, not yet bumped. PRs welcome; expectations modest.
 ## License
 
 [The Unlicense](LICENSE) — released into the public domain. Do whatever you want.
+
+
+### Multiple Claude accounts
+
+The default ingest, refresh and TUI refresh discover additional transcript roots from
+`~/.config/cockpit/accounts/*.configdir` (one absolute Claude config directory per file).
+`COCKPIT_ACCOUNTS_DIR` explicitly overrides that registry, including when `--projects`
+selects a fixture/custom primary root. An ordinary `--projects` override remains isolated.
+All accounts share Santa's existing index. Each newly indexed session retains its
+`account` and absolute `source_path`; raw export uses that source. The primary root is
+labelled `legacy` because older Alpha and Beta sessions share it. Unchanged existing
+rows acquire provenance on their next changed-file ingest or metadata refresh.
+Cockpit resolves an isolated session's account from its source root when resuming it.
+
+Offline integration check (no provider calls):
+`python3 scripts/test_profiles.py src/Santa.Cli/bin/Release/net10.0/santa.dll` after a Release build.

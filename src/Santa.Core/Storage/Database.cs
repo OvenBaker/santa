@@ -64,6 +64,10 @@ public sealed class Database : IDisposable
             using var rd = cmd.ExecuteReader();
             while (rd.Read()) existing.Add(rd.GetString(1));
         }
+        if (!existing.Contains("source_path"))
+            AddColumn(conn, "sessions", "source_path TEXT");
+        if (!existing.Contains("account"))
+            AddColumn(conn, "sessions", "account TEXT");
         if (!existing.Contains("derived_branches"))
             AddColumn(conn, "sessions", "derived_branches TEXT");
         if (!existing.Contains("summary_title"))

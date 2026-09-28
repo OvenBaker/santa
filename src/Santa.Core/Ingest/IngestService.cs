@@ -49,12 +49,13 @@ public sealed class IngestService
 
         // Materialise the file list up front so progress consumers know the total.
         // Claude projects first, then Codex rollouts (each tagged with its provider).
-        var files = DiscoverJsonl(opts.ProjectsRoot).Select(p => (Path: p, Provider: "claude-code"))
-            .Concat(DiscoverCodex(opts.CodexRoot).Select(p => (Path: p, Provider: "codex")))
+        var files = Sessions.ClaudeProfiles.Roots(opts.ProjectsRoot)
+            .SelectMany(root => DiscoverJsonl(root.Projects).Select(p => (Path: p, Provider: "claude-code", Account: root.Account)))
+            .Concat(DiscoverCodex(opts.CodexRoot).Select(p => (Path: p, Provider: "codex", Account: "codex")))
             .ToList();
         int total = files.Count;
 
-        foreach (var (path, provider) in files)
+        foreach (var (path, provider, account) in files)
         {
             if (opts.Limit is int lim && ingested >= lim) break;
             scanned++;
@@ -166,6 +167,16 @@ public sealed class IngestService
                     DerivedBranchesJson: derivedJson,
                     LastActiveAt: agg.LastActiveAt,
                     Provider: agg.Provider), tx);
+
+                using (var provenance = _db.Connection.CreateCommand())
+                {
+                    provenance.Transaction = tx;
+                    provenance.CommandText = "UPDATE sessions SET source_path=$path, account=$account WHERE id=$id";
+                    provenance.Parameters.AddWithValue("$path", path);
+                    provenance.Parameters.AddWithValue("$account", account);
+                    provenance.Parameters.AddWithValue("$id", agg.SessionId);
+                    provenance.ExecuteNonQuery();
+                }
 
                 if (agg.UsageByModel.Count > 0)
                     usage.Replace(agg.SessionId, agg.UsageByModel, tx);

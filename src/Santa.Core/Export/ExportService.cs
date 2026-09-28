@@ -22,6 +22,11 @@ public sealed class ExportService
     public string ResolveSourcePath(string sessionId)
     {
         using var cmd = _db.Connection.CreateCommand();
+        cmd.CommandText = "SELECT source_path FROM sessions WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", sessionId);
+        if (cmd.ExecuteScalar() is string source && File.Exists(source)) return source;
+        // Existing indexed sessions have no source_path until their next ingest.
+        cmd.Parameters.Clear();
         cmd.CommandText = "SELECT project_path FROM sessions WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", sessionId);
         var pp = cmd.ExecuteScalar() as string
